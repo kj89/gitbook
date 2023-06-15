@@ -1,0 +1,164 @@
+---
+description: Setting up your validator node has never been so easy. Get your validator running in minutes by following step by step instructions.
+---
+
+# Installation
+
+<figure><img src="https://raw.githubusercontent.com/kj89/cosmos-images/main/logos/${PROJECT_NAME}.png" alt=""><figcaption></figcaption></figure>
+
+**Chain ID**: ${CHAIN_ID} | **Latest Version Tag**: ${LATEST_VERSION_TAG} | **Custom Port**: ${CHAIN_PORT}
+
+### Setup validator name
+
+{% hint style='info' %}
+Replace **YOUR_MONIKER_GOES_HERE** with your validator name
+{% endhint %}
+
+```bash
+MONIKER="YOUR_MONIKER_GOES_HERE"
+```
+
+### Install dependencies
+
+#### Update system and install build tools
+
+```bash
+sudo apt -q update
+sudo apt -qy install curl git jq lz4 build-essential
+sudo apt -qy upgrade
+```
+
+#### Install Go
+
+```bash
+sudo rm -rf /usr/local/go
+curl -Ls https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz | sudo tar -xzf - -C /usr/local
+eval $(echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/golang.sh)
+eval $(echo 'export PATH=$PATH:$HOME/go/bin' | tee -a $HOME/.profile)
+```
+
+### Download and build binaries
+
+```bash
+# Clone project repository
+cd $HOME
+rm -rf ${GIT_DIR}
+git clone ${GIT_URL}
+cd ${GIT_DIR}
+git checkout ${LATEST_VERSION_TAG}
+
+# Build binaries
+make build
+
+# Prepare binaries for Cosmovisor
+mkdir -p $HOME/${CHAIN_DIR}/cosmovisor/genesis/bin
+mv ${CHAIN_BINARY_SRC} $HOME/${CHAIN_DIR}/cosmovisor/genesis/bin/
+rm -rf build
+
+# Create application symlinks
+sudo ln -s $HOME/${CHAIN_DIR}/cosmovisor/genesis $HOME/${CHAIN_DIR}/cosmovisor/current -f
+sudo ln -s $HOME/${CHAIN_DIR}/cosmovisor/current/bin/${CHAIN_APP} /usr/local/bin/${CHAIN_APP} -f
+```
+
+### Install Cosmovisor and create a service
+
+```bash
+# Download and install Cosmovisor
+go install cosmossdk.io/tools/cosmovisor/cmd/cosmovisor@v${COSMOVISOR_VERSION}
+
+# Create service
+sudo tee /etc/systemd/system/${CHAIN_APP}.service > /dev/null << EOF
+[Unit]
+Description=${CHAIN_NAME} node service
+After=network-online.target
+
+[Service]
+User=$USER
+ExecStart=$(which cosmovisor) run start --metrics --pruning=nothing --evm.tracer=json --minimum-gas-prices=1800000000aheart json-rpc.api eth,net,web3,miner --api.enable
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65535
+Environment="DAEMON_HOME=$HOME/${CHAIN_DIR}"
+Environment="DAEMON_NAME=${CHAIN_APP}"
+Environment="UNSAFE_SKIP_BACKUP=true"
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:$HOME/${CHAIN_DIR}/cosmovisor/current/bin"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable ${CHAIN_APP}
+```
+
+### Initialize the node
+
+```bash
+# Set node configuration
+${CHAIN_APP} config chain-id ${CHAIN_ID}
+${CHAIN_APP} config keyring-backend ${KEYRING_BACKEND}
+${CHAIN_APP} config node tcp://localhost:${CHAIN_PORT}57
+
+# Initialize the node
+${CHAIN_APP} init $MONIKER --chain-id ${CHAIN_ID}
+
+# Download genesis and addrbook
+curl -Ls https://snapshots.kjnodes.com/${CHAIN_NAME}/genesis.json > $HOME/${CHAIN_DIR}/config/genesis.json
+curl -Ls https://snapshots.kjnodes.com/${CHAIN_NAME}/addrbook.json > $HOME/${CHAIN_DIR}/config/addrbook.json
+
+# Add seeds
+sed -i -e "s|^seeds *=.*|seeds = \"${CHAIN_TENDERSEED_PEER}@${CHAIN_NAME}.rpc.kjnodes.com:${CHAIN_PORT}59\"|" $HOME/${CHAIN_DIR}/config/config.toml
+
+# Set minimum gas price
+sed -i -e "s|^minimum-gas-prices *=.*|minimum-gas-prices = \"${MIN_GAS_PRICE}\"|" $HOME/${CHAIN_DIR}/config/app.toml
+
+# Set pruning
+sed -i \
+  -e 's|^pruning *=.*|pruning = "nothing"|' \
+  $HOME/${CHAIN_DIR}/config/app.toml
+
+# Set custom ports
+sed -i -e "s%^proxy_app = \"tcp://127.0.0.1:26658\"%proxy_app = \"tcp://0.0.0.0:${CHAIN_PORT}58\"%; s%^laddr = \"tcp://127.0.0.1:26657\"%laddr = \"tcp://0.0.0.0:${CHAIN_PORT}57\"%; s%^pprof_laddr = \"localhost:6060\"%pprof_laddr = \"localhost:${CHAIN_PORT}66\"%; s%^laddr = \"tcp://0.0.0.0:26656\"%laddr = \"tcp://0.0.0.0:${CHAIN_PORT}56\"%; s%^prometheus_listen_addr = \":26660\"%prometheus_listen_addr = \":${CHAIN_PORT}60\"%" $HOME/${CHAIN_DIR}/config/config.toml
+sed -i -e "s%^address = \"tcp://0.0.0.0:1317\"%address = \"tcp://0.0.0.0:${CHAIN_PORT}17\"%; s%^address = \":8080\"%address = \":${CHAIN_PORT}80\"%; s%^address = \"0.0.0.0:9090\"%address = \"0.0.0.0:${CHAIN_PORT}90\"%; s%^address = \"0.0.0.0:9091\"%address = \"0.0.0.0:${CHAIN_PORT}91\"%; s%^address = \"127.0.0.1:8545\"%address = \"0.0.0.0:${CHAIN_PORT}45\"%; s%^ws-address = \"127.0.0.1:8546\"%ws-address = \"0.0.0.0:${CHAIN_PORT}46\"%; s%^metrics-address = \"127.0.0.1:6065\"%metrics-address = \"0.0.0.0:${CHAIN_PORT}65\"%" $HOME/${CHAIN_DIR}/config/app.toml
+```
+
+# Configuration changes for optimization and metrics
+```
+# config.toml
+sed -i \
+  -e 's|^create_empty_blocks *=.*|create_empty_blocks = false|' \
+  -e 's|^prometheus *=.*|prometheus = true|' \
+  -e 's|^create_empty_blocks_interval *=.*|create_empty_blocks_interval = "30s"|' \
+  -e 's|^timeout_propose *=.*|timeout_propose = "30s"|' \
+  -e 's|^timeout_propose_delta *=.*|timeout_propose_delta = "5s"|' \
+  -e 's|^timeout_prevote *=.*|timeout_prevote = "10s"|' \
+  -e 's|^timeout_prevote_delta *=.*|timeout_prevote_delta = "5s"|' \
+  -e 's|^cors_allowed_origins *=.*|cors_allowed_origins = ["*.humans.ai","*.humans.zone"]|' \
+  -e 's|^timeout_prevote_delta *=.*|timeout_prevote_delta = "5s"|' \
+  $HOME/${CHAIN_DIR}/config/config.toml
+
+# app.toml
+sed -i \
+  -e 's|^prometheus-retention-time *=.*|prometheus-retention-time = 1000000000000|' \
+  -e 's|^enabled *=.*|enabled = true|' \
+  -e '/^\[api\]$/,/^\[/ s/enable = false/enable = true/' \
+  -e 's|^swagger *=.*|swagger = true|' \
+  -e 's|^max-open-connections *=.*|max-open-connections = 100|' \
+  -e 's|^rpc-read-timeout *=.*|rpc-read-timeout = 5|' \
+  -e 's|^rpc-write-timeout *=.*|rpc-write-timeout = 3|' \
+  -e 's|^rpc-max-body-bytes *=.*|rpc-max-body-bytes = 1000000|' \
+  -e 's|^enabled-unsafe-cors *=.*|enabled-unsafe-cors = false|' \
+  $HOME/${CHAIN_DIR}/config/app.toml
+```
+
+### Download latest chain snapshot
+
+```bash
+curl -L https://snapshots.kjnodes.com/${CHAIN_NAME}/snapshot_latest.tar.lz4 | tar -Ilz4 -xf - -C $HOME/${CHAIN_DIR}
+[[ -f $HOME/${CHAIN_DIR}/data/upgrade-info.json ]] && cp $HOME/${CHAIN_DIR}/data/upgrade-info.json $HOME/${CHAIN_DIR}/cosmovisor/genesis/upgrade-info.json
+```
+
+### Start service and check the logs
+
+```bash
+sudo systemctl start ${CHAIN_APP} && sudo journalctl -u ${CHAIN_APP} -f --no-hostname -o cat
+```
